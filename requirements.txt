@@ -1,0 +1,16 @@
+# FROST Backup Emergency Recovery Tool Dependencies
+# These are well-established Bitcoin libraries for secure recovery
+
+# Secp256k1 operations (field arithmetic for Shamir reconstruction)
+coincurve>=20.0.0
+
+# BIP39 wordlist
+mnemonic>=0.21
+
+# Base58 encoding for xpriv
+base58>=2.1.1
+
+# Bitcoin library for xpriv/descriptor handling
+# Note: This may pull in additional dependencies but provides
+# standard-compliant BIP32 implementation
+python-bitcoinlib>=0.12.0
