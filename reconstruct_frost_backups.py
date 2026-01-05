@@ -5,7 +5,8 @@ FROST Backup Emergency Recovery Tool
 This tool recovers Bitcoin wallets from FROST backup shares.
 It is designed for emergency recovery if Frostsnap ceases operations.
 
-WARNING: Only run this on a secure offline machine!
+WARNING: Only run this on a secure offline machine! 
+This script will reconstruct and display your secret.
 
 Reference implementation: https://github.com/frostsnap/frostsnap
 Based on frost_backup specification v0
@@ -14,8 +15,9 @@ Based on frost_backup specification v0
 import sys
 import hashlib
 import re
-from typing import List
+from typing import List, Tuple
 from mnemonic import Mnemonic
+import secp256k1
 
 # secp256k1 curve order (for Shamir secret sharing field arithmetic)
 SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
@@ -83,14 +85,15 @@ class ShareBackup:
                 raise ShareBackupError(f"Word #{i+1} '{word}' not in BIP39 wordlist")
             word_indices.append(wordlist.index(word_lower))
 
-        # Unpack 275 bits into components
+        # Unpack 275 bits into components: 256 (scalar) + 8 (poly) + 11 (words checksum)
         scalar_bytes = bytearray(32)
         poly_checksum = 0
         words_checksum = 0
         total_bits_processed = 0
 
+        # Process bits MSB-first (as specified in FROST backup format)
         for word_idx in word_indices:
-            for bit_offset in range(BITS_PER_WORD - 1, -1, -1):
+            for bit_offset in range(BITS_PER_WORD - 1, -1, -1):  # 10, 9, 8, ..., 0
                 bit = (word_idx >> bit_offset) & 1
                 if bit != 0:
                     if total_bits_processed < SCALAR_BITS:
@@ -117,13 +120,160 @@ class ShareBackup:
 
 
 def compute_words_checksum(index: int, scalar_bytes: bytes, poly_checksum: int) -> int:
-    """Compute the words checksum for validation."""
+    """
+    Compute 11-bit words checksum.
+
+    Returns the first 11 bits of SHA256(index || scalar || poly_checksum).
+    """
     h = hashlib.sha256()
     h.update(index.to_bytes(4, 'big'))
     h.update(scalar_bytes)
     h.update(poly_checksum.to_bytes(2, 'big'))
     digest = h.digest()
-    return ((digest[0] << 3) | (digest[1] >> 5)) & 0x7FF
+
+    # Read first 16 bits as big-endian int, then take top 11 bits
+    two_bytes = int.from_bytes(digest[0:2], 'big')
+    return two_bytes >> 5
+
+
+def compute_share_image(index: int, scalar_bytes: bytes) -> Tuple[int, bytes]:
+    """
+    Compute public share image from secret share.
+
+    A share image is the public version of a share: share_scalar * G
+    where G is the secp256k1 generator point.
+
+    Args:
+        index: Share index
+        scalar_bytes: 32-byte secret share scalar
+
+    Returns:
+        Tuple of (index, 33-byte compressed secp256k1 point)
+    """
+    privkey = secp256k1.PrivateKey(scalar_bytes)
+    pubkey = privkey.pubkey
+    point_bytes = pubkey.serialize(compressed=True)
+    return (index, point_bytes)
+
+
+def compute_poly_checksum(index: int, scalar_bytes: bytes, poly_commitment: bytes) -> int:
+    """
+    Compute polynomial checksum.
+
+    Note: Uses index as 32-byte scalar (different from words checksum which uses 4-byte u32)
+
+    Args:
+        index: Share index
+        scalar_bytes: 32-byte secret share
+        poly_commitment: Concatenated polynomial points (threshold * 33 bytes)
+
+    Returns:
+        8-bit checksum (0-255)
+    """
+    h = hashlib.sha256()
+    h.update(index.to_bytes(32, 'big'))  # 32-byte scalar (different from words checksum!)
+    h.update(scalar_bytes)
+    h.update(poly_commitment)
+    digest = h.digest()
+    return digest[0]  # First 8 bits
+
+
+def verify_polynomial_checksum(share: ShareBackup, poly_commitment: bytes) -> bool:
+    """Verify share's polynomial checksum against reconstructed commitment."""
+    expected = compute_poly_checksum(share.index, share.scalar_bytes, poly_commitment)
+    return expected == share.poly_checksum
+
+
+def lagrange_coefficient_for_degree(degree: int, share_index: int, all_indices: List[int]) -> int:
+    """
+    Compute Lagrange coefficient for extracting polynomial coefficient at given degree.
+
+    Lagrange coefficients are scalars, but we work in the secp256k1 scalar field,
+    so all arithmetic is modulo SECP256K1_ORDER.
+
+    This builds the Lagrange basis polynomial L_i(x) = product_{j != i} ((x - x_j) / (x_i - x_j))
+    and extracts the coefficient of x^degree.
+
+    Args:
+        degree: Which polynomial coefficient to extract (0 to threshold-1)
+        share_index: The share's x-coordinate (x_i)
+        all_indices: All share x-coordinates being used
+
+    Returns:
+        Scalar coefficient in secp256k1 field (integer mod SECP256K1_ORDER)
+    """
+    # Start with constant polynomial p(x) = 1
+    poly = [1]
+
+    # Build L_i(x) by multiplying (x - x_j) / (x_i - x_j) for each j != i
+    for x_j in all_indices:
+        if x_j == share_index:
+            continue
+
+        # Compute 1 / (x_i - x_j) in the field using modular inverse
+        denom = (share_index - x_j) % SECP256K1_ORDER
+        denom_inv = pow(denom, SECP256K1_ORDER - 2, SECP256K1_ORDER)  # Fermat's little theorem
+
+        # Multiply current polynomial by (x - x_j) / denominator
+        # Expanding: poly(x) * (x - x_j) = poly(x) * x - poly(x) * x_j
+        new_poly = [0] * (len(poly) + 1)
+        for i, coeff in enumerate(poly):
+            new_poly[i + 1] = (new_poly[i + 1] + coeff) % SECP256K1_ORDER      # poly[i] * x term
+            new_poly[i] = (new_poly[i] - coeff * x_j) % SECP256K1_ORDER        # -poly[i] * x_j term
+
+        # Divide all coefficients by (x_i - x_j)
+        poly = [(c * denom_inv) % SECP256K1_ORDER for c in new_poly]
+
+    return poly[degree] if degree < len(poly) else 0
+
+
+def reconstruct_polynomial_commitment(share_images: List[Tuple[int, bytes]], threshold: int) -> bytes:
+    """
+    Reconstruct polynomial commitment from share images.
+
+    Uses Lagrange interpolation on elliptic curve points to recover
+    the polynomial coefficients as public keys.
+
+    Args:
+        share_images: List of (index, 33-byte point) tuples
+        threshold: Polynomial degree + 1
+
+    Returns:
+        Concatenated polynomial commitment bytes (threshold * 33 bytes)
+    """
+    indices = [idx for idx, _ in share_images]
+    points = [pt for _, pt in share_images]
+
+    poly_points = []
+
+    for degree in range(threshold):
+        # Reconstruct coefficient at this degree using Lagrange interpolation
+        # Collect all weighted points
+        weighted_points = []
+
+        for i, (x_i, point_bytes) in enumerate(share_images):
+            # Compute Lagrange coefficient for this degree
+            weight = lagrange_coefficient_for_degree(degree, x_i, indices)
+
+            # Scalar multiply: weight * point
+            pubkey = secp256k1.PublicKey(point_bytes, raw=True)
+            weighted_point = pubkey.tweak_mul(weight.to_bytes(32, 'big'))
+            weighted_points.append(weighted_point)
+
+        # Combine all weighted points
+        if len(weighted_points) == 1:
+            # Only one point, no need to combine
+            result_point = weighted_points[0]
+        else:
+            # Combine all points: combine() adds ALL keys in the list (doesn't add to the calling object)
+            combined_cdata = weighted_points[0].combine([wp.public_key for wp in weighted_points])
+            # Wrap the cdata result back into a PublicKey for serialization
+            result_point = secp256k1.PublicKey(combined_cdata)
+
+        # Serialize the coefficient point
+        poly_points.append(result_point.serialize(compressed=True))
+
+    return b''.join(poly_points)
 
 
 def lagrange_coefficient(x_i: int, x_values: List[int]) -> int:
@@ -140,10 +290,27 @@ def lagrange_coefficient(x_i: int, x_values: List[int]) -> int:
     return (numerator * denominator_inv) % SECP256K1_ORDER
 
 
-def recover_secret(shares: List[ShareBackup]) -> bytes:
-    """Recover secret from threshold shares using Lagrange interpolation."""
+def recover_secret(shares: List[ShareBackup], threshold: int = None) -> bytes:
+    """
+    Recover secret from threshold shares using Lagrange interpolation.
+
+    Performs polynomial checksum verification to detect mismatched shares.
+
+    Args:
+        shares: List of ShareBackup objects
+        threshold: Polynomial threshold (defaults to number of shares)
+
+    Returns:
+        32-byte secret
+
+    Raises:
+        ValueError: If shares are invalid or polynomial checksum fails
+    """
     if not shares:
         raise ValueError("No shares provided")
+
+    if threshold is None:
+        threshold = len(shares)
 
     indices = [share.index for share in shares]
     scalars = [int.from_bytes(share.scalar_bytes, 'big') for share in shares]
@@ -151,6 +318,19 @@ def recover_secret(shares: List[ShareBackup]) -> bytes:
     if len(indices) != len(set(indices)):
         raise ValueError("Duplicate share indices detected")
 
+    # Reconstruct polynomial commitment from share images
+    share_images = [compute_share_image(s.index, s.scalar_bytes) for s in shares]
+    poly_commitment = reconstruct_polynomial_commitment(share_images, threshold)
+
+    # Verify polynomial checksum for each share
+    for share in shares:
+        if not verify_polynomial_checksum(share, poly_commitment):
+            raise ValueError(
+                f"Polynomial checksum failed for share #{share.index}. "
+                "Shares may be from different wallets."
+            )
+
+    # Reconstruct secret using Lagrange interpolation
     secret = 0
     for x_i, y_i in zip(indices, scalars):
         coeff = lagrange_coefficient(x_i, indices)
@@ -261,8 +441,9 @@ def interactive_recovery():
     print("\nBitcoin Core (v22.0+):")
     print("  importdescriptors '[{\"desc\": \"<descriptor>\", \"timestamp\": \"now\"}]'")
     print("\nSparrow Wallet:")
-    print("  File > Import Wallet > Descriptor")
-    print("\nIMPORTANT: Verify addresses match before using!")
+    print("  File > New Wallet. Script Type: Taproot.")
+    print("  New or Imported Software Wallet > Master Private Key")
+    print("  Derivation Path: m/0/0/0/0")
     print("=" * 70 + "\n")
 
 
@@ -271,7 +452,7 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] in ['--help', '-h']:
         print(__doc__)
         print("\nUsage: python3 reconstruct_frost_backups.py")
-        print("\nReconstructs Bitcoin wallet from FROST backup shares.")
+        print("\nReconstructs Bitcoin wallet from FROST backups.")
         print("Outputs xpriv and descriptor for import into Bitcoin Core or Sparrow.\n")
         sys.exit(0)
 

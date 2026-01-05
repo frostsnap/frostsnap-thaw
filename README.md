@@ -1,24 +1,21 @@
 # frostsnap-thaw
 
-Emergency recovery tool for FROST backup shares.
+Emergency recovery tool for FROST backups.
 
-## What this does
+## Overview
 
-Reconstructs Bitcoin wallet from Frostsnap backup shares (recovery cards) when Frostsnap is unavailable.
+Reconstructs Bitcoin wallets from Frostsnap backups if the original software is unavailable. Implements Shamir secret sharing reconstruction with full checksum verification.
 
 ## Usage
 
 ```bash
+pip install -r requirements.txt
 python3 reconstruct_frost_backups.py
 ```
 
-Outputs xpriv and descriptor for import into Bitcoin Core or Sparrow Wallet.
+The tool will prompt for your shares and output an xpriv and descriptor for wallet import.
 
-## Requirements
-
-```bash
-pip install -r requirements.txt
-```
+**Security:** Run only on a fresh, offline, secure machine. Private keys are displayed on screen.
 
 ## Testing
 
@@ -26,15 +23,26 @@ pip install -r requirements.txt
 python3 test.py
 ```
 
-## Limitations
+29 tests validate against Frostsnap test vectors.
 
-Minimal implementation for emergency recovery. Does not include:
-- Polynomial checksum verification
-- Fingerprint grinding verification
-- Fuzzy recovery (auto-finding valid share subsets)
+## Implementation
 
-You must provide the correct threshold of backups that belong together.
+The tool implements:
 
-## Security
+- Lagrange interpolation for threshold secret recovery
+- Words checksum validation (detects transcription errors)
+- Polynomial checksum verification (detects mismatched shares)
+- BIP32 xpriv generation
+- Taproot descriptor output
 
-**Run on a fresh, offline, secure machine only.** Private keys will be displayed.
+Uses `secp256k1` Python bindings for elliptic curve operations.
+
+## Checksums
+
+Two checksums are verified per the FROST backup specification v0:
+
+**Words checksum (11-bit):** SHA256-based validation of individual share integrity. Catches transcription errors.
+
+**Polynomial checksum (8-bit):** Validates that all shares belong to the same wallet by reconstructing the polynomial commitment and verifying each share's embedded checksum.
+
+Note: Fingerprint grinding verification is not implemented. It protects against public key substitution by malicious coordinators during FROST signing sessions. Since this tool reconstructs the full secret offline, that attack vector doesn't apply.

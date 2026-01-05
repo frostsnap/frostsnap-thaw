@@ -169,6 +169,17 @@ class TestSecretRecovery:
         with pytest.raises(ValueError, match="Duplicate share indices"):
             recover_secret(shares)
 
+    def test_mismatched_shares_from_different_wallets_fail(self):
+        """Test that polynomial checksum detects shares from different wallets."""
+        # Try to mix share #1 from 2-of-3 scheme with share #2 from 3-of-5 scheme
+        # These are from different wallets (different secrets), so polynomial checksum should fail
+        mixed_shares = [
+            ShareBackup.from_string(TEST_SHARES_2_OF_3[0]),  # From wallet with secret 0x01...01
+            ShareBackup.from_string(TEST_SHARES_3_OF_5[1]),  # From wallet with secret 0xdeadbeef...
+        ]
+        with pytest.raises(ValueError, match="Polynomial checksum failed"):
+            recover_secret(mixed_shares)
+
 
 class TestBitcoinOutputs:
     """Test Bitcoin xpriv and descriptor generation."""
@@ -324,7 +335,7 @@ def run_tests():
     print(" FROST BACKUP RECOVERY TOOL - TEST SUITE")
     print("=" * 70)
     print()
-    print("Running tests against official test vectors...")
+    print("Running tests against test vectors...")
     print()
 
     # Run pytest

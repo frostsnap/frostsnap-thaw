@@ -1,8 +1,8 @@
 # FROST Backup Emergency Recovery Tool Dependencies
 # These are well-established Bitcoin libraries for secure recovery
 
-# Secp256k1 operations (field arithmetic for Shamir reconstruction)
-coincurve>=20.0.0
+# Secp256k1 operations (bitcoin-core bindings)
+secp256k1>=0.14.0
 
 # BIP39 wordlist
 mnemonic>=0.21
