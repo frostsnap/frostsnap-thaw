@@ -242,7 +242,6 @@ def reconstruct_polynomial_commitment(share_images: List[Tuple[int, bytes]], thr
         Concatenated polynomial commitment bytes (threshold * 33 bytes)
     """
     indices = [idx for idx, _ in share_images]
-    points = [pt for _, pt in share_images]
 
     poly_points = []
 

@@ -4,7 +4,7 @@ Emergency recovery tool for FROST backups.
 
 ## Overview
 
-Reconstructs Bitcoin wallets from Frostsnap backups if the original software is unavailable. Implements Shamir secret sharing reconstruction with full checksum verification.
+Reconstructs Bitcoin wallet extended private key (`xpriv`) from Frostsnap backups if the original software is unavailable. Implements Shamir secret sharing reconstruction with full checksum verification.
 
 ## Usage
 
