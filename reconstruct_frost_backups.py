@@ -2,8 +2,8 @@
 """
 FROST Backup Emergency Recovery Tool
 
-This tool recovers Bitcoin wallets from FROST backup shares.
-It is designed for emergency recovery if Frostsnap ceases operations.
+This tool recombines FROST backup shares into xprivs.
+It is designed for emergency recovery if Frostsnap is unavailable or ceases operations.
 
 WARNING: Only run this on a secure offline machine! 
 This script will reconstruct and display your secret.

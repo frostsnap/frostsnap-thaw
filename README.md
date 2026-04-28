@@ -2,9 +2,11 @@
 
 Emergency recovery tool for FROST backups.
 
+Note: this tool should only be considered in emergency situations on a fresh, offline, secure machine. Private keys are displayed on screen. The entire purpose of FROST is to avoid this situation of the secret key existing on a single device!
+
 ## Overview
 
-Reconstructs Bitcoin wallet extended private key (`xpriv`) from Frostsnap backups if the original software is unavailable. Implements Shamir secret sharing reconstruction with full checksum verification.
+Reconstructs Bitcoin wallet extended private key (`xpriv`) from FROST backups if the original software is unavailable. Implements Shamir secret sharing reconstruction with full checksum verification. The reconstituted `xpriv` can be loaded into another wallet such as Bitcoin Core or Sparrow.
 
 ## Usage
 
@@ -14,8 +16,6 @@ python3 reconstruct_frost_backups.py
 ```
 
 The tool will prompt for your shares and output an xpriv and descriptor for wallet import.
-
-**Security:** Run only on a fresh, offline, secure machine. Private keys are displayed on screen.
 
 ## Testing
 
