@@ -355,9 +355,53 @@ def generate_xpriv(secret_bytes: bytes, network: str = 'mainnet') -> str:
     return base58.b58encode(serialized + checksum).decode('ascii')
 
 
+# BIP-380 descriptor checksum. Reference implementation transcribed verbatim
+# from the BIP so it matches Bitcoin Core's getdescriptorinfo output exactly.
+# Without this suffix, importdescriptors rejects the descriptor with
+# "Missing checksum" (src/wallet/rpc/backup.cpp passes require_checksum=true).
+INPUT_CHARSET = "0123456789()[],'/*abcdefgh@:$%{}IJKLMNOPQRSTUVWXYZ&+-.;<=>?!^_|~ijklmnopqrstuvwxyzABCDEFGH`#\"\\ "
+CHECKSUM_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+GENERATOR = [0xf5dee51989, 0xa9fdca3312, 0x1bab10e32d, 0x3706b1677a, 0x644d626ffd]
+
+
+def descsum_polymod(symbols):
+    chk = 1
+    for value in symbols:
+        top = chk >> 35
+        chk = (chk & 0x7ffffffff) << 5 ^ value
+        for i in range(5):
+            chk ^= GENERATOR[i] if ((top >> i) & 1) else 0
+    return chk
+
+
+def descsum_expand(s):
+    groups = []
+    symbols = []
+    for c in s:
+        if c not in INPUT_CHARSET:
+            return None
+        v = INPUT_CHARSET.find(c)
+        symbols.append(v & 31)
+        groups.append(v >> 5)
+        if len(groups) == 3:
+            symbols.append(groups[0] * 9 + groups[1] * 3 + groups[2])
+            groups = []
+    if len(groups) == 1:
+        symbols.append(groups[0])
+    elif len(groups) == 2:
+        symbols.append(groups[0] * 3 + groups[1])
+    return symbols
+
+
+def descsum_create(s):
+    symbols = descsum_expand(s) + [0, 0, 0, 0, 0, 0, 0, 0]
+    checksum = descsum_polymod(symbols) ^ 1
+    return s + '#' + ''.join(CHECKSUM_CHARSET[(checksum >> (5 * (7 - i))) & 31] for i in range(8))
+
+
 def generate_descriptor(xpriv: str) -> str:
-    """Generate Bitcoin descriptor for the wallet (Taproot)."""
-    return f"tr({xpriv}/0/0/0/0/<0;1>/*)"
+    """Generate Bitcoin descriptor for the wallet (Taproot) with BIP-380 checksum."""
+    return descsum_create(f"tr({xpriv}/0/0/0/0/<0;1>/*)")
 
 
 def interactive_recovery():
@@ -437,7 +481,7 @@ def interactive_recovery():
     print("\n" + "=" * 70)
     print("IMPORT TO WALLET")
     print("=" * 70)
-    print("\nBitcoin Core (v22.0+):")
+    print("\nBitcoin Core (v26.0+):")
     print("  importdescriptors '[{\"desc\": \"<descriptor>\", \"timestamp\": \"now\"}]'")
     print("\nSparrow Wallet:")
     print("  File > New Wallet. Script Type: Taproot.")
