@@ -481,12 +481,9 @@ def interactive_recovery():
     print("\n" + "=" * 70)
     print("IMPORT TO WALLET")
     print("=" * 70)
-    print("\nBitcoin Core (v26.0+):")
-    print("  importdescriptors '[{\"desc\": \"<descriptor>\", \"timestamp\": \"now\"}]'")
-    print("\nSparrow Wallet:")
-    print("  File > New Wallet. Script Type: Taproot.")
-    print("  New or Imported Software Wallet > Master Private Key")
-    print("  Derivation Path: m/0/0/0/0")
+    print("\nImport the descriptor above into any descriptor-aware wallet (Bitcoin")
+    print("Core v28.0+; older versions reject the <0;1> multipath descriptor).")
+    print("See the README for rescan/timestamp caveats.")
     print("=" * 70 + "\n")
 
 

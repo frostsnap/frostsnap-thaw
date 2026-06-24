@@ -232,6 +232,31 @@ class TestBitcoinOutputs:
         descriptor2 = generate_descriptor(xpriv)
         assert descriptor1 == descriptor2
 
+    def test_xpriv_and_descriptor_match_reference(self):
+        """Golden vector: pin the EXACT xpriv and descriptor for a known secret.
+
+        This is the regression guard that the shape-only tests above cannot
+        provide. The recovery path depends on three constants taken verbatim
+        from the Rust reference frost_backup/src/lib.rs:
+          - the all-zero BIP32 chain code (`let chaincode = [0u8; 32];`)
+          - the derivation path / script type (`tr({xpriv}/0/0/0/0/<0;1>/*)`)
+          - the mainnet xprv version bytes
+        If any of these silently changes, the tool would derive a DIFFERENT
+        wallet that recovers no funds while every other test still passes.
+        Pinning the full output strings makes that failure loud.
+        """
+        secret = bytes.fromhex(EXPECTED_SECRET_1_OF_1)
+        xpriv = generate_xpriv(secret, 'mainnet')
+        assert xpriv == (
+            "xprv9s21ZrQH143K24Mfq5zL5MhWK9hUhhGbd45hLXo2Pq2oqzMMo63oStZzF"
+            "93yjHmmfwkTW7jWmaf7X9aF3GP9D3mXSChQcm2zAZG6kerWdMw"
+        )
+        assert generate_descriptor(xpriv) == (
+            "tr(xprv9s21ZrQH143K24Mfq5zL5MhWK9hUhhGbd45hLXo2Pq2oqzMMo63oStZzF"
+            "93yjHmmfwkTW7jWmaf7X9aF3GP9D3mXSChQcm2zAZG6kerWdMw/0/0/0/0/<0;1>/*)"
+            "#5g5wtnwn"
+        )
+
 
 class TestDescriptorChecksum:
     """Test BIP-380 descriptor checksum implementation against the spec."""

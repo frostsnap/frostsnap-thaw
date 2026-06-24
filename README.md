@@ -17,13 +17,22 @@ python3 reconstruct_frost_backups.py
 
 The tool will prompt for your shares and output an xpriv and descriptor for wallet import.
 
+## Importing into a wallet
+
+The descriptor is the complete recovery artifact: it encodes the key, the Taproot script type, and the derivation path, and carries its own checksum. Import it into any descriptor-aware wallet to access your funds. Two things to get right:
+
+- **Bitcoin Core must be v28.0 or newer.** Earlier versions reject the `<0;1>` multipath descriptor with a parse error. Multipath descriptor support ([BIP 389](https://github.com/bitcoin/bips/blob/master/bip-0389.mediawiki)) landed in Core 28.0.
+- **Rescan from before the wallet was created.** When importing, set the rescan start time to the wallet's creation date — or `0` to scan from genesis (slower, but always complete). A `now` timestamp scans nothing prior and silently finds no existing coins. No Frostsnap wallet existed before mid-2025, so a `timestamp` of `1735689600` (2025-01-01 UTC) or `0` is always a safe floor.
+
+Once imported and rescanned, checking your balance and spending are standard descriptor-wallet operations; follow your wallet's normal documentation for those steps.
+
 ## Testing
 
 ```bash
 python3 test.py
 ```
 
-31 tests cover share parsing, secret recovery, and descriptor generation.
+32 tests cover share parsing, secret recovery, and descriptor generation (including a golden-vector test pinning the exact xpriv/descriptor output to the Rust reference).
 
 ## Implementation
 
