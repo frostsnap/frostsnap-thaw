@@ -406,7 +406,7 @@ def generate_descriptor(xpriv: str) -> str:
 
 def interactive_recovery():
     """Run interactive recovery session."""
-    print("\nFROST Backup Emergency Recovery Tool")
+    print("\nFROST Backup Emergency Recovery Tool (frost_backup spec v0)")
     print("=" * 70)
     print("WARNING: Run on air-gapped machine only. Private keys will be displayed.")
     print("=" * 70)
