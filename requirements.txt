@@ -1,8 +1,5 @@
 # Secp256k1 operations (bitcoin-core bindings)
 secp256k1>=0.14.0
 
-# BIP39 wordlist
-mnemonic>=0.21
-
 # Base58 encoding for xpriv
 base58>=2.1.1
