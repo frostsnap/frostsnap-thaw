@@ -15,6 +15,8 @@ from reconstruct_frost_backups import (
     recover_secret,
     generate_xpriv,
     generate_descriptor,
+    descsum_create,
+    CHECKSUM_CHARSET,
     SECP256K1_ORDER,
 )
 
@@ -215,11 +217,12 @@ class TestBitcoinOutputs:
         xpriv = generate_xpriv(secret, 'mainnet')
         descriptor = generate_descriptor(xpriv)
 
-        # Check format: tr(xpriv/0/0/0/0/<0;1>/*)
+        # Format: tr(xpriv/0/0/0/0/<0;1>/*)#<8-char checksum>
         assert descriptor.startswith('tr(')
-        assert descriptor.endswith(')')
         assert '/0/0/0/0/<0;1>/*' in descriptor
         assert xpriv in descriptor
+        assert descriptor[-9] == '#'
+        assert all(c in CHECKSUM_CHARSET for c in descriptor[-8:])
 
     def test_descriptor_deterministic(self):
         """Test that descriptor generation is deterministic."""
@@ -228,6 +231,30 @@ class TestBitcoinOutputs:
         descriptor1 = generate_descriptor(xpriv)
         descriptor2 = generate_descriptor(xpriv)
         assert descriptor1 == descriptor2
+
+
+class TestDescriptorChecksum:
+    """Test BIP-380 descriptor checksum implementation against the spec."""
+
+    def test_bip380_published_vector(self):
+        """BIP-380 test vector: raw(deadbeef) -> raw(deadbeef)#89f8spxm."""
+        assert descsum_create("raw(deadbeef)") == "raw(deadbeef)#89f8spxm"
+
+    def test_generated_descriptor_accepted_by_bitcoin_core(self):
+        """Generated descriptor must carry an 8-char checksum from CHECKSUM_CHARSET.
+
+        Bitcoin Core's importdescriptors calls Parse(..., require_checksum=true),
+        which rejects bare descriptors with "Missing checksum".
+        """
+        secret = bytes.fromhex(EXPECTED_SECRET_2_OF_3)
+        xpriv = generate_xpriv(secret, 'mainnet')
+        descriptor = generate_descriptor(xpriv)
+
+        body, _, checksum = descriptor.rpartition('#')
+        assert body and len(checksum) == 8
+        assert all(c in CHECKSUM_CHARSET for c in checksum)
+        # Recomputing the checksum on the body must reproduce the full descriptor.
+        assert descsum_create(body) == descriptor
 
 
 class TestEndToEnd:

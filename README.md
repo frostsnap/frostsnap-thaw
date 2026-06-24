@@ -23,7 +23,7 @@ The tool will prompt for your shares and output an xpriv and descriptor for wall
 python3 test.py
 ```
 
-29 tests validate against Frostsnap test vectors.
+31 tests cover share parsing, secret recovery, and descriptor generation.
 
 ## Implementation
 
