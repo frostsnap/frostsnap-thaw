@@ -32,7 +32,7 @@ Once imported and rescanned, checking your balance and spending are standard des
 python3 test.py
 ```
 
-32 tests cover share parsing, secret recovery, and descriptor generation (including a golden-vector test pinning the exact xpriv/descriptor output to the Rust reference).
+50 tests cover share parsing, secret recovery, and descriptor generation (including a golden-vector test pinning the exact xpriv/descriptor output to the Rust reference).
 
 ## Implementation
 
@@ -54,4 +54,4 @@ Two checksums are verified per the FROST backup specification v0:
 
 **Polynomial checksum (8-bit):** Validates that all shares belong to the same wallet by reconstructing the polynomial commitment and verifying each share's embedded checksum.
 
-Note: Fingerprint grinding verification is not implemented. It protects against public key substitution by malicious coordinators during FROST signing sessions. Since this tool reconstructs the full secret offline, that attack vector doesn't apply.
+**Fingerprint (`frost-v0`):** Key generation grinds a fingerprint into the public polynomial of every key with threshold 2 or more. The tool checks that the polynomial interpolated from the shares carries it, and rejects a set that does not: its shares are from different keys, or one was mistranscribed.
