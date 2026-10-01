@@ -8,10 +8,23 @@ Note: this tool should only be considered in emergency situations on a fresh, of
 
 Reconstructs Bitcoin wallet extended private key (`xpriv`) from FROST backups if the original software is unavailable. Implements Shamir secret sharing reconstruction with full checksum verification. The reconstituted `xpriv` can be loaded into another wallet such as Bitcoin Core or Sparrow.
 
+## Prerequisites
+
+1. [Python3](https://www.python.org/downloads/)
+2. [pip](https://pip.pypa.io/en/stable/installation/)
+3. Python [virtual environment](https://packaging.python.org/en/latest/tutorials/installing-packages/#creating-and-using-virtual-environments)
+
 ## Usage
 
 ```bash
+# create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# install dependencies
 pip install -r requirements.txt
+
+# run script
 python3 reconstruct_frost_backups.py
 ```
 
@@ -29,6 +42,8 @@ Once imported and rescanned, checking your balance and spending are standard des
 ## Testing
 
 ```bash
+pip install pytest
+
 python3 test.py
 ```
 
