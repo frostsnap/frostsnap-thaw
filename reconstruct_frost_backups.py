@@ -14,8 +14,9 @@ Based on frost_backup specification v0
 
 import sys
 import hashlib
+import itertools
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from mnemonic import Mnemonic
 import secp256k1
 
@@ -31,6 +32,11 @@ POLY_CHECKSUM_BITS = 8
 WORDS_CHECKSUM_BITS = 11
 POLY_CHECKSUM_START = SCALAR_BITS  # 256
 WORDS_CHECKSUM_START = POLY_CHECKSUM_START + POLY_CHECKSUM_BITS  # 264
+
+# frost-v0 fingerprint parameters
+FINGERPRINT_TAG = b"frost-v0"
+FINGERPRINT_BITS_PER_COEFF = 18
+FINGERPRINT_MAX_BITS_TOTAL = 36
 
 
 class ShareBackupError(Exception):
@@ -51,8 +57,9 @@ class ShareBackup:
     """
 
     def __init__(self, index: int, scalar_bytes: bytes, poly_checksum: int):
-        if index == 0:
-            raise ShareBackupError("Share index cannot be 0")
+        # Index 0 is a bare secret: the backup carries the secret itself.
+        if index > 0xFFFFFFFF:
+            raise ShareBackupError("Share index must fit in 32 bits")
         if len(scalar_bytes) != 32:
             raise ShareBackupError(f"Scalar must be 32 bytes, got {len(scalar_bytes)}")
 
@@ -69,6 +76,8 @@ class ShareBackup:
             raise ShareBackupError("Invalid format. Expected: #<index> <25 words>")
 
         index = int(match.group(1))
+        if index > 0xFFFFFFFF:
+            raise ShareBackupError("Share index must fit in 32 bits")
         words = match.group(2).upper().split()
 
         if len(words) != NUM_WORDS:
@@ -107,6 +116,10 @@ class ShareBackup:
                         checksum_bit = total_bits_processed - WORDS_CHECKSUM_START
                         words_checksum |= (1 << (WORDS_CHECKSUM_BITS - 1 - checksum_bit))
                 total_bits_processed += 1
+
+        # The scalar must be less than the group order; it is rejected, never reduced
+        if int.from_bytes(scalar_bytes, 'big') >= SECP256K1_ORDER:
+            raise ShareBackupError("Scalar is not less than the secp256k1 group order")
 
         # Validate words checksum
         expected_checksum = compute_words_checksum(index, bytes(scalar_bytes), poly_checksum)
@@ -265,7 +278,15 @@ def reconstruct_polynomial_commitment(share_images: List[Tuple[int, bytes]], thr
             result_point = weighted_points[0]
         else:
             # Combine all points: combine() adds ALL keys in the list (doesn't add to the calling object)
-            combined_cdata = weighted_points[0].combine([wp.public_key for wp in weighted_points])
+            try:
+                combined_cdata = weighted_points[0].combine([wp.public_key for wp in weighted_points])
+            except Exception:
+                # The sum is the point at infinity, i.e. a zero coefficient. That
+                # happens when more shares than the true threshold are
+                # interpolated. Serialize it as 33 zero bytes (as the reference
+                # implementation does) so the checksum comparison reports it.
+                poly_points.append(bytes(33))
+                continue
             # Wrap the cdata result back into a PublicKey for serialization
             result_point = secp256k1.PublicKey(combined_cdata)
 
@@ -275,14 +296,49 @@ def reconstruct_polynomial_commitment(share_images: List[Tuple[int, bytes]], thr
     return b''.join(poly_points)
 
 
-def lagrange_coefficient(x_i: int, x_values: List[int]) -> int:
-    """Compute Lagrange coefficient L_i(0) in secp256k1 field."""
+def check_fingerprint(poly_commitment: bytes) -> Optional[int]:
+    """
+    Check that a polynomial commitment carries the frost-v0 fingerprint.
+
+    A running SHA256 hash absorbs byte(len(tag)) || tag || ser(A_0). Then each
+    non-constant coefficient A_j in turn must give the hash at least `needed`
+    leading zero bits, until FINGERPRINT_MAX_BITS_TOTAL bits have been checked,
+    so only A_1 and A_2 carry fingerprint bits. A threshold-1 polynomial has no
+    non-constant coefficients and passes with 0 bits.
+
+    Args:
+        poly_commitment: Concatenated polynomial points (threshold * 33 bytes)
+
+    Returns:
+        The number of fingerprint bits verified, or None if the check fails
+    """
+    coeffs = [poly_commitment[i:i + 33] for i in range(0, len(poly_commitment), 33)]
+    state = hashlib.sha256(bytes([len(FINGERPRINT_TAG)]) + FINGERPRINT_TAG + coeffs[0])
+    bits = 0
+    for coeff in coeffs[1:]:
+        needed = min(FINGERPRINT_BITS_PER_COEFF, FINGERPRINT_MAX_BITS_TOTAL - bits)
+        if needed == 0:
+            break
+        # digest_with(state, coeff): the digest after absorbing coeff, leaving state unchanged
+        with_coeff = state.copy()
+        with_coeff.update(coeff)
+        digest = with_coeff.digest()
+        # Leading zero bits of the 32-byte digest, most significant bit first
+        if 256 - int.from_bytes(digest, 'big').bit_length() < needed:
+            return None
+        state.update(coeff)
+        bits += needed
+    return bits
+
+
+def lagrange_coefficient(x_i: int, x_values: List[int], x: int = 0) -> int:
+    """Compute Lagrange coefficient L_i(x) in secp256k1 field (L_i(0) by default)."""
     numerator = 1
     denominator = 1
 
     for x_j in x_values:
         if x_j != x_i:
-            numerator = (numerator * ((-x_j) % SECP256K1_ORDER)) % SECP256K1_ORDER
+            numerator = (numerator * ((x - x_j) % SECP256K1_ORDER)) % SECP256K1_ORDER
             denominator = (denominator * ((x_i - x_j) % SECP256K1_ORDER)) % SECP256K1_ORDER
 
     denominator_inv = pow(denominator, SECP256K1_ORDER - 2, SECP256K1_ORDER)
@@ -293,49 +349,154 @@ def recover_secret(shares: List[ShareBackup], threshold: int = None) -> bytes:
     """
     Recover secret from threshold shares using Lagrange interpolation.
 
-    Performs polynomial checksum verification to detect mismatched shares.
+    The shares are verified together first: the public polynomial F
+    interpolated from `threshold` of them must carry the frost-v0 fingerprint,
+    every share must lie on F, and every share's polynomial checksum must
+    verify against F.
 
     Args:
         shares: List of ShareBackup objects
-        threshold: Polynomial threshold (defaults to number of shares)
+        threshold: Polynomial threshold. If omitted it is discovered by trying
+            subsets of 2, 3, ... shares and keeping the first F with the
+            most fingerprint bits. A lone share needs threshold 1 stated.
 
     Returns:
         32-byte secret
 
     Raises:
-        ValueError: If shares are invalid or polynomial checksum fails
+        ValueError: If the shares do not verify together
     """
     if not shares:
         raise ValueError("No shares provided")
 
-    if threshold is None:
-        threshold = len(shares)
+    # A #0 backup is not a share: it is recovered on its own
+    if any(share.index == 0 for share in shares):
+        return recover_bare_secret(shares)
 
-    indices = [share.index for share in shares]
-    scalars = [int.from_bytes(share.scalar_bytes, 'big') for share in shares]
-
-    if len(indices) != len(set(indices)):
-        raise ValueError("Duplicate share indices detected")
-
-    # Reconstruct polynomial commitment from share images
-    share_images = [compute_share_image(s.index, s.scalar_bytes) for s in shares]
-    poly_commitment = reconstruct_polynomial_commitment(share_images, threshold)
-
-    # Verify polynomial checksum for each share
+    # Interpolation needs distinct indices, so a subset takes one share per
+    # index; different shares at one index (shares of different keys usually
+    # both start at #1) are tried in turn
+    shares_by_index = {}
     for share in shares:
-        if not verify_polynomial_checksum(share, poly_commitment):
+        shares_by_index.setdefault(share.index, []).append(share)
+    indices = sorted(shares_by_index)
+
+    # Without a threshold, subset sizes start at 2 since a single share has no
+    # fingerprint to check. A lone share is recovered as a threshold-1 key only
+    # when threshold 1 is stated: a share of a larger key would pass its 8-bit
+    # polynomial checksum 1 time in 256 and give a wrong secret.
+    if threshold is not None:
+        if threshold < 1:
+            raise ValueError("Threshold must be at least 1")
+        min_size = threshold
+    elif len(shares) == 1:
+        raise ValueError(
+            "One share is not enough to recover the key. Enter more shares. If the "
+            "wallet needs only one share (threshold 1), state threshold 1."
+        )
+    else:
+        min_size = 2
+    if len(indices) < min_size:
+        raise ValueError(f"Need at least {min_size} shares with different indices, got {len(indices)}")
+    sizes = [threshold] if threshold is not None else range(min_size, len(indices) + 1)
+
+    # Interpolate F from each subset and check its fingerprint. As in the Rust
+    # reference (frost_backup's find_valid_subset), keep the first F with the
+    # most fingerprint bits: a threshold-2 key carries only 18, so the search
+    # goes on to larger subsets and stops early only at the full 36.
+    subsets = (
+        subset
+        for size in sizes
+        for index_combo in itertools.combinations(indices, size)
+        for subset in itertools.product(*(shares_by_index[i] for i in index_combo))
+    )
+    best = None
+    for subset in subsets:
+        share_images = [compute_share_image(s.index, s.scalar_bytes) for s in subset]
+        poly_commitment = reconstruct_polynomial_commitment(share_images, len(subset))
+        # A zero top coefficient means the subset fits a smaller threshold: a
+        # smaller subset finds that F, and a stated threshold rules it out
+        if poly_commitment[-33:] == bytes(33):
+            continue
+        bits = check_fingerprint(poly_commitment)
+        if bits is not None and (best is None or bits > best[0]):
+            best = (bits, subset, poly_commitment)
+            if bits == FINGERPRINT_MAX_BITS_TOTAL:
+                break
+
+    if best is None:
+        if threshold is not None:
             raise ValueError(
-                f"Polynomial checksum failed for share #{share.index}. "
-                "Shares may be from different wallets."
+                f"Fingerprint check failed: no {threshold} of these shares form a key with "
+                f"threshold {threshold}. The threshold may be wrong, or a share is from a "
+                "different key or was mistranscribed."
             )
+        raise ValueError(
+            "Fingerprint check failed: no group of these shares forms a key. Fewer shares "
+            "than the threshold may have been given, or a share is from a different key "
+            "or was mistranscribed."
+        )
+    _, subset, poly_commitment = best
+    subset_indices = [s.index for s in subset]
+    subset_scalars = [int.from_bytes(s.scalar_bytes, 'big') for s in subset]
+
+    # Every share must lie on F: F(x) = y*G. Since G has prime order this holds
+    # exactly when y = f(x), for the secret polynomial f through the subset.
+    strays = []
+    for position, share in enumerate(shares):
+        f_x = 0
+        for x_i, y_i in zip(subset_indices, subset_scalars):
+            coeff = lagrange_coefficient(x_i, subset_indices, share.index)
+            f_x = (f_x + (coeff * y_i)) % SECP256K1_ORDER
+        if f_x != int.from_bytes(share.scalar_bytes, 'big'):
+            strays.append(f"#{share.index} (entry {position + 1})")
+    if strays:
+        raise ValueError(
+            f"These shares do not belong with the others: {', '.join(strays)}. Each is from "
+            "a different key or was mistranscribed. Remove them and try again."
+        )
+
+    # Every share's polynomial checksum must verify against F
+    failed = [f"#{s.index}" for s in shares if not verify_polynomial_checksum(s, poly_commitment)]
+    if failed:
+        raise ValueError(
+            f"Polynomial checksum failed for share {', '.join(failed)}. A share may be from a "
+            "different key or mistranscribed, or fewer shares than the threshold were given."
+        )
 
     # Reconstruct secret using Lagrange interpolation
     secret = 0
-    for x_i, y_i in zip(indices, scalars):
-        coeff = lagrange_coefficient(x_i, indices)
+    for x_i, y_i in zip(subset_indices, subset_scalars):
+        coeff = lagrange_coefficient(x_i, subset_indices)
         secret = (secret + (coeff * y_i)) % SECP256K1_ORDER
 
     return secret.to_bytes(32, 'big')
+
+
+def recover_bare_secret(shares: List[ShareBackup]) -> bytes:
+    """
+    Recover from #0 backups, which carry the secret itself.
+
+    They need no interpolation: each polynomial checksum is verified against
+    the backup's own degree-0 commitment (secret * G). They must not be
+    combined with shares, and if there are several they must agree.
+    """
+    if any(share.index != 0 for share in shares):
+        raise ValueError("A #0 backup must not be combined with shares")
+
+    secret = None
+    for share in shares:
+        _, commitment = compute_share_image(0, share.scalar_bytes)
+        if not verify_polynomial_checksum(share, commitment):
+            raise ValueError(
+                "Polynomial checksum failed for backup #0: it was mistranscribed or is corrupted"
+            )
+        if secret is None:
+            secret = share.scalar_bytes
+        elif secret != share.scalar_bytes:
+            raise ValueError("The #0 backups encode different secrets")
+
+    return secret
 
 
 def generate_xpriv(secret_bytes: bytes, network: str = 'mainnet') -> str:
@@ -452,7 +613,7 @@ def interactive_recovery():
     # Recover secret
     print("\nRecovering secret...")
     try:
-        secret = recover_secret(shares)
+        secret = recover_secret(shares, threshold)
     except Exception as e:
         print(f"Error: Recovery failed - {e}")
         sys.exit(1)
